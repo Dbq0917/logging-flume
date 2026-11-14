@@ -32,6 +32,7 @@ import org.apache.flume.event.Event;
 import org.apache.flume.event.EventBuilder;
 import org.apache.flume.event.SimpleEvent;
 import org.apache.flume.exception.ChannelException;
+import org.apache.flume.exception.ChannelFullException;
 import org.junit.Assert;
 import org.junit.Before;
 import org.junit.Ignore;
@@ -256,7 +257,7 @@ public class TestMemoryChannel {
         tx.close();
     }
 
-    @Test(expected = ChannelException.class)
+    @Test(expected = ChannelFullException.class)
     public void testByteCapacityOverload() {
         Context context = new Context();
         Map<String, String> parms = new HashMap<String, String>();

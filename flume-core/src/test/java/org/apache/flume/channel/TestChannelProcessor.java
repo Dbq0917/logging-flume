@@ -22,15 +22,18 @@ import static org.mockito.Mockito.when;
 import com.google.common.base.Charsets;
 import com.google.common.collect.Lists;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import org.apache.flume.Channel;
 import org.apache.flume.ChannelSelector;
 import org.apache.flume.Context;
 import org.apache.flume.Transaction;
 import org.apache.flume.conf.Configurables;
+import org.apache.flume.conf.TransactionCapacitySupported;
 import org.apache.flume.event.Event;
 import org.apache.flume.event.EventBuilder;
 import org.apache.flume.exception.ChannelException;
+import org.apache.flume.exception.ChannelFullException;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -143,6 +146,135 @@ public class TestChannelProcessor {
             }
             transaction.commit();
             transaction.close();
+        }
+    }
+
+    @Test
+    public void testChannelFullSplitsBatchWithoutLoss() {
+        LimitedChannel channel = new LimitedChannel(20, 100);
+        ChannelProcessor processor = new ChannelProcessor(select(channel));
+
+        List<Event> events = events(100);
+        processor.processEventBatch(events);
+
+        Assert.assertEquals(events, channel.getStoredEvents());
+        Assert.assertTrue(
+                "Batch should be reduced only as much as necessary",
+                Collections.max(channel.getCommittedBatchSizes()) > 1);
+    }
+
+    @Test
+    public void testBatchLargerThanTransactionCapacityIsChunked() {
+        LimitedChannel channel = new LimitedChannel(100, 20);
+        ChannelProcessor processor = new ChannelProcessor(select(channel));
+
+        List<Event> events = events(100);
+        processor.processEventBatch(events);
+
+        Assert.assertEquals(events, channel.getStoredEvents());
+        Assert.assertEquals(5, channel.getCommittedBatchSizes().size());
+        Assert.assertTrue(channel.getCommittedBatchSizes().stream().allMatch(size -> size == 20));
+    }
+
+    @Test
+    public void testSuccessfulBatchUsesSingleTransaction() {
+        LimitedChannel channel = new LimitedChannel(100, 100);
+        ChannelProcessor processor = new ChannelProcessor(select(channel));
+
+        processor.processEventBatch(events(100));
+
+        Assert.assertEquals(Collections.singletonList(100), channel.getCommittedBatchSizes());
+    }
+
+    @Test
+    public void testSingleEventIsRetriedWhenChannelIsFull() {
+        LimitedChannel channel = new LimitedChannel(100, 100);
+        channel.failNextCommit();
+        ChannelProcessor processor = new ChannelProcessor(select(channel));
+
+        Event event = EventBuilder.withBody("event", Charsets.UTF_8);
+        processor.processEvent(event);
+
+        Assert.assertEquals(Collections.singletonList(event), channel.getStoredEvents());
+    }
+
+    private static ChannelSelector select(Channel channel) {
+        ChannelSelector selector = new ReplicatingChannelSelector();
+        selector.setChannels(Collections.singletonList(channel));
+        return selector;
+    }
+
+    private static List<Event> events(int count) {
+        List<Event> events = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            events.add(EventBuilder.withBody("event " + i, Charsets.UTF_8));
+        }
+        return events;
+    }
+
+    private static class LimitedChannel extends BasicChannelSemantics implements TransactionCapacitySupported {
+        private final int maxCommitBatchSize;
+        private final long transactionCapacity;
+        private final List<Event> storedEvents = new ArrayList<>();
+        private final List<Integer> committedBatchSizes = new ArrayList<>();
+        private int commitsToFail;
+
+        LimitedChannel(int maxCommitBatchSize, long transactionCapacity) {
+            this.maxCommitBatchSize = maxCommitBatchSize;
+            this.transactionCapacity = transactionCapacity;
+        }
+
+        void failNextCommit() {
+            commitsToFail = 1;
+        }
+
+        List<Event> getStoredEvents() {
+            return storedEvents;
+        }
+
+        List<Integer> getCommittedBatchSizes() {
+            return committedBatchSizes;
+        }
+
+        @Override
+        public long getTransactionCapacity() {
+            return transactionCapacity;
+        }
+
+        @Override
+        protected BasicTransactionSemantics createTransaction() {
+            return new BasicTransactionSemantics() {
+                private final List<Event> putList = new ArrayList<>();
+
+                @Override
+                protected void doPut(Event event) {
+                    putList.add(event);
+                }
+
+                @Override
+                protected Event doTake() {
+                    return null;
+                }
+
+                @Override
+                protected void doCommit() {
+                    if (commitsToFail > 0) {
+                        commitsToFail--;
+                        throw new ChannelFullException("test channel is full");
+                    }
+                    if (putList.size() > maxCommitBatchSize || putList.size() > transactionCapacity) {
+                        throw new ChannelFullException("test channel is full");
+                    }
+                    storedEvents.addAll(putList);
+                    committedBatchSizes.add(putList.size());
+                    putList.clear();
+                }
+
+                @Override
+                protected void doRollback() {
+                    putList.clear();
+                }
+            };
         }
     }
 }

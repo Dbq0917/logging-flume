@@ -123,7 +123,7 @@ public class MemoryChannel extends BasicChannelSemantics implements TransactionC
             int remainingChange = takeList.size() - putList.size();
             if (remainingChange < 0) {
                 if (!bytesRemaining.tryAcquire(putByteCounter, keepAlive, TimeUnit.SECONDS)) {
-                    throw new ChannelException(
+                    throw new ChannelFullException(
                             "Cannot commit transaction. Byte capacity " + "allocated to store event body "
                                     + byteCapacity * byteCapacitySlotSize
                                     + "reached. Please increase heap space/byte capacity allocated to "
